@@ -1,0 +1,106 @@
+#+title: mu4e-bone.el --- Highlight BARK reports in mu4e
+
+[[https://intver.org/][https://img.shields.io/badge/versioning-intver.org-blue.svg?style=for-the-badge]]
+
+=mu4e-bone= highlights mu4e header lines whose =Message-Id= matches an
+open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.json= sources as [[https://codeberg.org/bzg/bone][bone]].
+
+* Requirements
+
+- =~/.config/bone/config.edn= (shared with bone), containing at least a
+  =:sources= vector with =:url= entries pointing to =reports.json= files
+  (local paths or URLs).
+- =mu4e-bone= supports =reports.json= bark-format =0.9.1=.
+- =mu4e-bone= does not call the =bone= binary, it only reads the files
+  that =bone= produces. You need to have run =bone= at least once to
+  generate =config.edn= and the =reports.json= files.
+
+* Commands
+
+- =M-x mu4e-bone= -- Search mu4e for open BARK reports and highlight them.
+- =M-x mu4e-bone-highlight= -- Highlight matches in the current headers buffer.
+- =M-x mu4e-bone-topic= -- Search filtered by topic.
+- =M-x mu4e-bone-clear= -- Remove all =mu4e-bone= overlays.
+
+** Local marks
+
+The following commands toggle bone's local marks (stored in
+=~/.config/bone/state.edn= and shared with the [[https://codeberg.org/bzg/bone][bone]] CLI and the
+[[https://codeberg.org/bzg/gnus-bone][gnus-bone]] companion).
+
+- =M-x mu4e-bone-mark-read= -- toggle the =:read-at= timestamp on the
+  current report.
+- =M-x mu4e-bone-mark-todo= -- toggle the =:todo= flag.
+- =M-x mu4e-bone-mark-sticky= -- toggle the =:sticky= flag.
+
+The annotation gains a leading mark column: =!= for =:todo=, =*= for
+=:sticky=, =r= for =:read-at= (no flag), space otherwise.
+
+* Suggested key bindings
+
+=mu4e-bone= does not bind any keys. The example below uses a dedicated
+=C-c b= prefix to avoid clashing with mu4e's bindings:
+
+#+begin_src emacs-lisp
+(with-eval-after-load 'mu4e
+  (require 'mu4e-bone)
+  (defvar mu4e-bone-prefix-map
+    (let ((m (make-sparse-keymap)))
+      (define-key m (kbd "b") #'mu4e-bone)
+      (define-key m (kbd "h") #'mu4e-bone-highlight)
+      (define-key m (kbd "t") #'mu4e-bone-topic)
+      (define-key m (kbd "c") #'mu4e-bone-clear)
+      (define-key m (kbd "r") #'mu4e-bone-mark-read)
+      (define-key m (kbd "!") #'mu4e-bone-mark-todo)
+      (define-key m (kbd "*") #'mu4e-bone-mark-sticky)
+      m))
+  (define-key mu4e-headers-mode-map (kbd "C-c b") mu4e-bone-prefix-map))
+#+end_src
+
+Then =C-c b b= runs =mu4e-bone=, =C-c b != toggles TODO, etc.
+
+* Annotation format
+
+Each highlighted line is prefixed with a fixed-width annotation:
+
+: M T FFF P D±n  E±n  [V]
+: | | |   | |    |    `-- votes (e.g. [1/1])
+: | | |   | |    `------- expiry (days, when set)
+: | | |   | `------------ deadline (days, when set)
+: | | |   `-------------- priority (A / B / C)
+: | | `------------------ flags: Acked / Owned / close-reason
+: | `-------------------- type: B(ug), P(atch), ?(request), A(nnouncement), R(elease), C(hange)
+: `---------------------- mark from state.edn (! = TODO, * = sticky, r = read)
+
+Concrete example:
+
+: r B AO- A D+3  E+5  [3]
+
+reads as: marked read locally, bug, acked + owned + still open,
+priority A, deadline in 3 days, expiry in 5 days, 3 votes. (A leading
+minus, e.g. =D-2=, means the date is past.)
+
+* Contributing
+
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht][bug report]] with =[BUG] mu4e-bone: <SHORT EXPLICIT BUG DESCRIPTION>=
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht][patch]] with =[PATCH] mu4e-bone: <COMMIT SUMMARY>=
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht][feature request]] with =[FR] mu4e-bone: <FEATURE REQUEST>=
+- Share any [[mailto:~bzg/barkyard@lists.sr.ht <ANYTHING>][other question or idea]]
+
+You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[https://liberapay.com/bzg/][liberapay]].
+
+* Intentional Versioning
+
+This project uses [[https://intver.org][Intentional Versioning]], here are the three audiences:
+
+- =x= : end users who use mu4e-bone
+- =y= : external packagers
+- =z= : contributors to the codebase
+
+* License
+
+Copyright (C) 2026 Bastien Guerry
+
+=mu4e-bone.el= is published under the terms of the GNU General Public
+License as the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
