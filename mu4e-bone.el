@@ -28,6 +28,7 @@
 ;; M-x mu4e-bone-topic RET     -- same, filtered by topic
 ;; M-x mu4e-bone-highlight RET -- highlight matches in the current headers buffer
 ;; M-x mu4e-bone-clear RET     -- remove highlights
+;; M-x mu4e-bone-update-cache RET -- force update of remote reports
 ;;
 ;; The following commands toggle bone's local marks (kept in
 ;; ~/.config/bone/state.edn so they are shared with the bone CLI):
@@ -43,6 +44,8 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'subr-x)
+(require 'time-date)
 (require 'mu4e)
 
 (declare-function mu4e-message-at-point "mu4e-message")
@@ -50,19 +53,23 @@
 (declare-function mu4e-headers-for-each "mu4e-headers")
 (declare-function mu4e-headers-search "mu4e-headers")
 
-(defvar mu4e-bone-config-file "~/.config/bone/config.edn"
-  "Path to bone config.edn.
-The file is an EDN map with at least these keys:
-  :addresses  vector of email addresses belonging to the user
-  :sources    vector of maps, each with a :url key pointing at a
-              reports.json (local file:// URI or http(s) URL).")
+(defvar url-http-response-status)
 
-(defvar mu4e-bone-state-file "~/.config/bone/state.edn"
-  "Path to bone's local state file.
-An EDN map keyed by RFC-2822 message-id (with angle brackets).
-Each value is a map with keys :subject :type :author :created and
-optionally :flag (:todo or :sticky) and :read-at (ISO-8601 string).
-Shared with the bone CLI.")
+(defgroup mu4e-bone nil
+  "Highlight BARK reports in mu4e headers."
+  :group 'mu4e)
+
+(defcustom mu4e-bone-reports-source nil
+  "Path or URL to a BARK reports.json file.
+If nil, load sources configured in config.edn under `mu4e-bone-config-dir'."
+  :type '(choice (const :tag "Use config.edn sources" nil)
+                 (string :tag "Local path or URL"))
+  :group 'mu4e-bone)
+
+(defcustom mu4e-bone-config-dir "~/.config/bone"
+  "Directory containing bone configuration and state/cache files."
+  :type 'directory
+  :group 'mu4e-bone)
 
 (defface mu4e-bone-face
   '((((background light)) :background "#e8e8e8")
@@ -72,7 +79,7 @@ Shared with the bone CLI.")
 
 (defface mu4e-bone-annotation-face
   '((t :inherit shadow))
-  "Face for right-margin annotations (type, flags, priority, votes)."
+  "Face for right-margin annotations."
   :group 'mu4e-bone)
 
 (defconst mu4e-bone-minimum-bark-format "0.9.1"
@@ -82,21 +89,21 @@ Shared with the bone CLI.")
   "Fixed width for the votes column.")
 
 (defvar mu4e-bone-deadline-width 5
-  "Fixed width for the deadline column (e.g. \"D-2  \" or \"     \").")
+  "Fixed width for the deadline column.")
 
 (defvar mu4e-bone-expiry-width 5
-  "Fixed width for the expiry column (e.g. \"E-2  \" or \"     \").")
+  "Fixed width for the expiry column.")
 
 ;;; --- Config / sources loading ---------------------------------------------
 
 (defun mu4e-bone--uri-to-path (uri)
-  "Convert a file:// URI to a local path; pass other URIs through unchanged."
+  "Convert file:// URI to local path, otherwise return URI."
   (if (string-prefix-p "file://" uri)
       (url-unhex-string (substring uri 7))
     uri))
 
 (defun mu4e-bone--read-edn-source-urls (text)
-  "Return list of :url strings from the :sources vector in EDN TEXT."
+  "Extract list of :url strings from :sources in EDN TEXT."
   (when (string-match
          ":sources[[:space:]]*\\[\\(\\(?:[^][]\\|\\[[^][]*\\]\\)*\\)\\]"
          text)
@@ -108,46 +115,91 @@ Shared with the bone CLI.")
         (setq pos (match-end 0)))
       (nreverse acc))))
 
+(defun mu4e-bone--load-config ()
+  "Load config file and return SOURCE-URIS list."
+  (let ((file (expand-file-name "config.edn" mu4e-bone-config-dir)))
+    (unless (file-readable-p file)
+      (error "mu4e-bone: cannot read config %s" file))
+    (let* ((text (with-temp-buffer
+                   (insert-file-contents file)
+                   (goto-char (point-min))
+                   (while (re-search-forward "^[ \t]*;.*$" nil t)
+                     (replace-match ""))
+                   (buffer-string))))
+      (mapcar #'mu4e-bone--uri-to-path
+              (mu4e-bone--read-edn-source-urls text)))))
+
 (defun mu4e-bone--load-sources ()
-  "Return list of reports.json paths/URLs from `mu4e-bone-config-file'."
-  (let* ((file (expand-file-name mu4e-bone-config-file))
-         (text (with-temp-buffer
-                 (insert-file-contents file)
-                 (buffer-string))))
-    (mapcar #'mu4e-bone--uri-to-path
-            (mu4e-bone--read-edn-source-urls text))))
+  "Return list of reports.json paths or URLs."
+  (if mu4e-bone-reports-source
+      (list (mu4e-bone--uri-to-path mu4e-bone-reports-source))
+    (mu4e-bone--load-config)))
 
 (defun mu4e-bone--http-url-p (source)
   "Return non-nil if SOURCE is an HTTP(S) URL."
   (string-match-p "\\`https?://" source))
 
+(defun mu4e-bone--java-hash (str)
+  "Calculate Java String hashCode of STR as an unsigned 32-bit integer."
+  (let ((h 0)
+        (len (length str)))
+    (dotimes (i len)
+      (setq h (logand (+ (* h 31) (aref str i)) #xffffffff)))
+    h))
+
+(defun mu4e-bone--source-to-cache-file (src)
+  "Return cache file path for remote source SRC."
+  (let* ((h (format "%08x" (mu4e-bone--java-hash src)))
+         (safe (replace-regexp-in-string "[^a-zA-Z0-9._-]" "_" src))
+         (prefix (substring safe 0 (min 80 (length safe)))))
+    (expand-file-name
+     (concat "cache/reports/" prefix "-" h ".json")
+     mu4e-bone-config-dir)))
+
+(defun mu4e-bone--fetch-json-from-url (url)
+  "Synchronously fetch JSON from URL."
+  (let ((buf (url-retrieve-synchronously url t)))
+    (unless buf (error "mu4e-bone: failed to fetch %s" url))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (when (and (bound-and-true-p url-http-response-status)
+                     (>= url-http-response-status 400))
+            (error "mu4e-bone: HTTP error %d from %s" url-http-response-status url))
+          (unless (re-search-forward "\r?\n\r?\n" nil t)
+            (error "mu4e-bone: malformed HTTP response from %s" url))
+          (let ((json-object-type 'alist)
+                (json-array-type 'list))
+            (json-read)))
+      (kill-buffer buf))))
+
+(defun mu4e-bone--write-json-to-file (data file)
+  "Write JSON DATA to FILE."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (insert (json-encode data))))
+
 (defun mu4e-bone--read-json (source)
-  "Read JSON from SOURCE, a local path or HTTP(S) URL."
+  "Read JSON from SOURCE, using local cache for remote URLs if available."
   (let ((json-object-type 'alist)
         (json-array-type 'list))
     (if (mu4e-bone--http-url-p source)
-        (let ((buf (url-retrieve-synchronously source t)))
-          (unless buf (error "mu4e-bone: failed to fetch %s" source))
-          (unwind-protect
-              (with-current-buffer buf
-                (goto-char (point-min))
-                (unless (re-search-forward "\n\n" nil t)
-                  (error "mu4e-bone: malformed HTTP response from %s" source))
-                (json-read))
-            (kill-buffer buf)))
+        (let ((cache-file (mu4e-bone--source-to-cache-file source)))
+          (if (file-exists-p cache-file)
+              (json-read-file cache-file)
+            (let ((data (mu4e-bone--fetch-json-from-url source)))
+              (mu4e-bone--write-json-to-file data cache-file)
+              data)))
       (json-read-file source))))
 
 (defun mu4e-bone--extract-open-reports (source)
-  "Extract report plists for open reports from SOURCE.
-SOURCE may be a local file path or an HTTP(S) URL.
-Each entry is (MESSAGE-ID . plist).  A report is open when its
-status is >= 4."
+  "Extract open reports from SOURCE."
   (let* ((data (mu4e-bone--read-json source))
          (fv (alist-get 'bark-format data))
          (reports (alist-get 'reports data))
          (result '()))
     (when (and fv (version< fv mu4e-bone-minimum-bark-format))
-      (message "mu4e-bone: %s has bark-format %s, minimum supported is %s"
+      (message "mu4e-bone: %s has format %s, min supported is %s"
                source fv mu4e-bone-minimum-bark-format))
     (dolist (r reports result)
       (let ((mid          (alist-get 'message-id r))
@@ -174,25 +226,52 @@ status is >= 4."
                                  ("resolved"   "R")
                                  ("expired"    "E")
                                  ("superseded" "S")
-                                 (_ (if closed "R" "-"))))))
-            (push (cons mid (list :type (or type "bug")
-                                  :flags flags
-                                  :priority (or priority 0)
-                                  :votes votes
-                                  :deadline deadline
-                                  :expiry expiry
-                                  :topic topic
-                                  :subject subject
-                                  :from from
-                                  :from-name from-name
-                                  :date date))
+                                 (_ (if closed "R" "-")))))
+                (norm-mid (mu4e-bone--bracketed-mid mid)))
+            (push (cons norm-mid (list :type (or type "bug")
+                                       :flags flags
+                                       :priority (or priority 0)
+                                       :votes votes
+                                       :deadline deadline
+                                       :expiry expiry
+                                       :topic topic
+                                       :subject subject
+                                       :from from
+                                       :from-name from-name
+                                       :date date))
                   result)))))))
 
 (defun mu4e-bone--load-all-open-reports ()
-  "Collect open (message-id . plist) pairs from all sources."
-  (mapcan #'mu4e-bone--extract-open-reports (mu4e-bone--load-sources)))
+  "Collect open report pairs from all sources, tolerating failures."
+  (let ((result nil))
+    (dolist (source (mu4e-bone--load-sources))
+      (condition-case err
+          (setq result (append result (mu4e-bone--extract-open-reports source)))
+        (error
+         (message "mu4e-bone: failed loading source %s: %s"
+                  source (error-message-string err)))))
+    result))
 
-;;; --- Minimal EDN reader/writer for ~/.config/bone/state.edn ---------------
+(defun mu4e-bone-update-cache ()
+  "Force-refresh the local cache from remote JSON sources."
+  (interactive)
+  (let ((sources (mu4e-bone--load-sources))
+        (count 0))
+    (dolist (source sources)
+      (when (mu4e-bone--http-url-p source)
+        (message "mu4e-bone: updating cache for %s..." source)
+        (condition-case err
+            (let ((data (mu4e-bone--fetch-json-from-url source))
+                  (cache-file (mu4e-bone--source-to-cache-file source)))
+              (mu4e-bone--write-json-to-file data cache-file)
+              (setq count (1+ count))
+              (message "mu4e-bone: cache updated for %s" source))
+          (error
+           (message "mu4e-bone: failed updating %s: %s"
+                    source (error-message-string err))))))
+    (message "mu4e-bone: cache update finished (%d updated)." count)))
+
+;; --- EDN reader/writer for ~/.config/bone/state.edn -----------------------
 
 (defun mu4e-bone--edn-skip-ws ()
   (skip-chars-forward " \t\n\r,"))
@@ -203,42 +282,15 @@ status is >= 4."
   (let ((c (char-after)))
     (cond
      ((null c)   (error "mu4e-bone EDN: unexpected EOF"))
-     ((eq c ?\") (mu4e-bone--edn-read-string))
+     ((eq c ?\") (read (current-buffer)))
      ((eq c ?:)  (mu4e-bone--edn-read-keyword))
      ((eq c ?\{) (mu4e-bone--edn-read-map))
      ((eq c ?\[) (mu4e-bone--edn-read-vector))
      ((or (and (>= c ?0) (<= c ?9))
           (and (eq c ?-) (let ((d (char-after (1+ (point)))))
-                           (and d (>= d ?0) (<= d ?9)))))
+                            (and d (>= d ?0) (<= d ?9)))))
       (mu4e-bone--edn-read-number))
      (t (mu4e-bone--edn-read-symbol)))))
-
-(defun mu4e-bone--edn-read-string ()
-  (forward-char 1)
-  (let ((chars nil))
-    (while (not (eq (char-after) ?\"))
-      (let ((c (char-after)))
-        (cond
-         ((null c) (error "mu4e-bone EDN: unterminated string"))
-         ((eq c ?\\)
-          (forward-char 1)
-          (let ((esc (char-after)))
-            (unless esc (error "mu4e-bone EDN: dangling backslash"))
-            (push (pcase esc
-                    (?n ?\n) (?t ?\t) (?r ?\r)
-                    (?b ?\b) (?f ?\f)
-                    (?\\ ?\\) (?\" ?\")
-                    (?u (forward-char 1)
-                        (let ((hex (buffer-substring-no-properties
-                                    (point) (+ (point) 4))))
-                          (forward-char 3)
-                          (string-to-number hex 16)))
-                    (_ esc))
-                  chars))
-          (forward-char 1))
-         (t (push c chars) (forward-char 1)))))
-    (forward-char 1)
-    (apply #'string (nreverse chars))))
 
 (defun mu4e-bone--edn-read-keyword ()
   (forward-char 1)
@@ -283,17 +335,8 @@ status is >= 4."
     (nreverse acc)))
 
 (defun mu4e-bone--edn-write-string (s)
-  "Serialize S as an EDN/Clojure string literal."
-  (concat "\""
-          (replace-regexp-in-string
-           "[\\\\\"\n\t\r\b\f]"
-           (lambda (m)
-             (pcase (aref m 0)
-               (?\n "\\n") (?\t "\\t") (?\r "\\r")
-               (?\b "\\b") (?\f "\\f")
-               (?\\ "\\\\") (?\" "\\\"")))
-           s t t)
-          "\""))
+  "Format string S as an EDN string."
+  (format "%S" s))
 
 (defun mu4e-bone--edn-write-value (v)
   (cond
@@ -306,7 +349,7 @@ status is >= 4."
    (t (error "mu4e-bone EDN: cannot serialize %S" v))))
 
 (defun mu4e-bone--edn-write-entry (entry)
-  "Format an inner state ENTRY (alist with keyword keys) as an EDN map."
+  "Format entry as an EDN map."
   (if (null entry) "{}"
     (concat "{"
             (mapconcat (lambda (kv)
@@ -316,11 +359,11 @@ status is >= 4."
                        entry ", ")
             "}")))
 
-;;; --- State file I/O -------------------------------------------------------
+;; --- State file I/O -------------------------------------------------------
 
 (defun mu4e-bone--read-state ()
-  "Return bone's state.edn as an alist of (mid . inner-alist), or nil."
-  (let ((file (expand-file-name mu4e-bone-state-file)))
+  "Read state file."
+  (let ((file (expand-file-name "state.edn" mu4e-bone-config-dir)))
     (when (file-readable-p file)
       (condition-case err
           (with-temp-buffer
@@ -330,13 +373,13 @@ status is >= 4."
             (when (eq (char-after) ?{)
               (mu4e-bone--edn-read-map)))
         (error
-         (message "mu4e-bone: cannot parse %s: %s -- using empty state."
+         (message "mu4e-bone: cannot parse %s: %s"
                   file (error-message-string err))
          nil)))))
 
 (defun mu4e-bone--write-state (state)
-  "Write STATE (alist of (mid . inner-alist)) to `mu4e-bone-state-file'."
-  (let ((file (expand-file-name mu4e-bone-state-file)))
+  "Write STATE to state file."
+  (let ((file (expand-file-name "state.edn" mu4e-bone-config-dir)))
     (make-directory (file-name-directory file) t)
     (with-temp-file file
       (if (null state)
@@ -350,35 +393,46 @@ status is >= 4."
             (insert (mu4e-bone--edn-write-entry (cdr kv)))))
         (insert "}\n")))))
 
-;;; --- State transitions (mirror bone's apply-transition) -------------------
+;; --- State transitions ----------------------------------------------------
 
 (defun mu4e-bone--iso-now ()
   (format-time-string "%Y-%m-%dT%H:%M:%S.%6NZ" nil t))
 
 (defun mu4e-bone--author-string (info)
-  "Build \"Name <email>\" from INFO's :from-name and :from, or nil."
+  "Build author string from INFO."
   (let ((n (plist-get info :from-name))
         (e (plist-get info :from)))
     (cond
-     ((and n e (not (string-empty-p n))) (concat n " <" e ">"))
+     ((and n e (not (string= n ""))) (concat n " <" e ">"))
      (e e)
      (n n))))
 
+(defun mu4e-bone--alist-dissoc (alist key)
+  "Remove KEY from ALIST copy."
+  (assq-delete-all key (copy-alist alist)))
+
+(defun mu4e-bone--alist-assoc (alist key value)
+  "Set KEY to VALUE in ALIST copy."
+  (let ((e (copy-alist alist)))
+    (setf (alist-get key e) value)
+    e))
+
 (defun mu4e-bone--enrich-entry (existing info)
-  "Refresh entry metadata from INFO plist.  Only sets fields present in INFO.
-EXISTING is an alist (keyword keys).  Returns a new alist."
+  "Refresh metadata from INFO in EXISTING."
   (let ((entry (copy-alist existing)))
     (dolist (pair '((:subject . :subject)
                     (:type    . :type)
                     (:date    . :created)))
-      (when-let* ((v (plist-get info (car pair))))
-        (setf (alist-get (cdr pair) entry) v)))
-    (when-let* ((author (mu4e-bone--author-string info)))
-      (setf (alist-get :author entry) author))
+      (let ((v (plist-get info (car pair))))
+        (when v
+          (setf (alist-get (cdr pair) entry) v))))
+    (let ((author (mu4e-bone--author-string info)))
+      (when author
+        (setf (alist-get :author entry) author)))
     entry))
 
 (defun mu4e-bone--state-put (state mid entry)
-  "Set MID -> ENTRY in STATE, preserving order when MID is already present."
+  "Set MID to ENTRY in STATE, keeping order."
   (if (assoc mid state)
       (mapcar (lambda (kv) (if (equal (car kv) mid) (cons mid entry) kv))
               state)
@@ -388,19 +442,8 @@ EXISTING is an alist (keyword keys).  Returns a new alist."
   "Remove MID from STATE."
   (cl-remove mid state :key #'car :test #'equal))
 
-(defun mu4e-bone--alist-dissoc (alist key)
-  "Return a copy of ALIST without KEY."
-  (assq-delete-all key (copy-alist alist)))
-
-(defun mu4e-bone--alist-assoc (alist key value)
-  "Return a copy of ALIST with KEY set to VALUE."
-  (let ((e (copy-alist alist)))
-    (setf (alist-get key e) value)
-    e))
-
 (defun mu4e-bone--apply-transition (state action mid info)
-  "Toggle ACTION (:read, :todo, :sticky) for MID in STATE.
-INFO is the report's plist (used to enrich the entry on first touch)."
+  "Apply ACTION transition for MID in STATE."
   (let* ((base (mu4e-bone--enrich-entry (cdr (assoc mid state)) info))
          (flag (alist-get :flag base))
          (new
@@ -408,7 +451,7 @@ INFO is the report's plist (used to enrich the entry on first touch)."
             (:read   (if (alist-get :read-at base)
                          (mu4e-bone--alist-dissoc base :read-at)
                        (mu4e-bone--alist-assoc  base :read-at
-                                                (mu4e-bone--iso-now))))
+                                                 (mu4e-bone--iso-now))))
             (:todo   (if (eq flag :todo)
                          (mu4e-bone--alist-dissoc base :flag)
                        (mu4e-bone--alist-assoc  base :flag :todo)))
@@ -420,10 +463,10 @@ INFO is the report's plist (used to enrich the entry on first touch)."
         (mu4e-bone--state-delete state mid)
       (mu4e-bone--state-put state mid new))))
 
-;;; --- Annotation formatting ------------------------------------------------
+;; --- Annotation formatting ------------------------------------------------
 
 (defun mu4e-bone--mark-prefix (entry)
-  "Return a single-character mark for state ENTRY."
+  "Get mark char for state ENTRY."
   (let ((flag (cdr (assq :flag entry)))
         (read (cdr (assq :read-at entry))))
     (cond
@@ -440,12 +483,12 @@ INFO is the report's plist (used to enrich the entry on first touch)."
       s)))
 
 (defun mu4e-bone--bracketed-mid (mid)
-  "Ensure MID is bracketed, for state.edn key compatibility with bone."
+  "Ensure MID is bracketed."
   (let ((bare (mu4e-bone--normalize-mid mid)))
     (concat "<" bare ">")))
 
 (defun mu4e-bone--type-letter (type)
-  "Return a single-letter abbreviation for report TYPE."
+  "Get letter abbreviation for TYPE."
   (pcase type
     ("bug"          "B")
     ("patch"        "P")
@@ -456,15 +499,14 @@ INFO is the report's plist (used to enrich the entry on first touch)."
     (_              "·")))
 
 (defun mu4e-bone--deadline-days (deadline)
-  "Return days until DEADLINE (a \"YYYY-MM-DD\" string), or nil."
+  "Days until YYYY-MM-DD DEADLINE."
   (when deadline
     (let* ((dl (date-to-time (concat deadline " 00:00:00")))
            (diff (float-time (time-subtract dl (current-time)))))
       (ceiling (/ diff 86400.0)))))
 
 (defun mu4e-bone--annotation (info &optional entry)
-  "Build a fixed-width annotation string from report INFO plist.
-When non-nil, ENTRY is the state.edn alist for this report."
+  "Build annotation string for report INFO and state ENTRY."
   (let* ((mark     (mu4e-bone--mark-prefix entry))
          (type     (mu4e-bone--type-letter (plist-get info :type)))
          (flags    (plist-get info :flags))
@@ -483,39 +525,33 @@ When non-nil, ENTRY is the state.edn alist for this report."
          (votes-pad (string-pad votes-str mu4e-bone-votes-width)))
     (concat mark " " type " " flags " " pri-str " " dl-pad ex-pad votes-pad)))
 
-;;; --- Query building -------------------------------------------------------
+;; --- Query building -------------------------------------------------------
 
 (defun mu4e-bone--build-query (reports)
-  "Build a mu4e query matching all message-ids in REPORTS.
-REPORTS is a list of (message-id . plist).  mu4e/mu uses bare
-message-ids, so brackets are stripped.  Message-ids containing
-Xapian-special characters (spaces, parens, AND/OR/NOT as bare
-tokens) are passed through verbatim and may break the query."
+  "Build query string for REPORTS."
   (mapconcat (lambda (r)
                (format "msgid:%s" (mu4e-bone--normalize-mid (car r))))
              reports
              " OR "))
 
 (defun mu4e-bone--build-mid-map (reports)
-  "Build a hash-table from REPORTS keyed by bare message-id, value is the plist."
+  "Build mapping from bare message-id to info."
   (let ((ht (make-hash-table :test 'equal)))
     (dolist (r reports)
       (puthash (mu4e-bone--normalize-mid (car r)) (cdr r) ht))
     ht))
 
-;;; --- Overlay highlighting -------------------------------------------------
+;; --- Overlay highlighting -------------------------------------------------
 
 (defvar-local mu4e-bone--active-reports nil
   "Buffer-local cache of BARK reports for auto-rehighlighting.")
 
 (defvar mu4e-bone--pending-reports nil
-  "Global pending reports awaiting the next `mu4e-headers-found-hook' fire.
-Consumed by `mu4e-bone--install-pending'.")
+  "Global pending reports awaiting next search finish.")
 
 (defun mu4e-bone--apply-overlays (reports)
-  "Apply overlays for REPORTS in the current `mu4e-headers-mode' buffer.
-Annotation is prepended via `before-string' so it doesn't clobber
-mu4e's header columns."
+  "Apply overlays for REPORTS in the current `mu4e-headers-mode' buffer."
+  (remove-overlays (point-min) (point-max) 'mu4e-bone t)
   (when (derived-mode-p 'mu4e-headers-mode)
     (let ((id-map (mu4e-bone--build-mid-map reports))
           (state  (mu4e-bone--read-state)))
@@ -538,17 +574,14 @@ mu4e's header columns."
                                       'face 'mu4e-bone-annotation-face)))))))))
 
 (defun mu4e-bone--rehighlight ()
-  "Re-apply BARK overlays in the current buffer.
-Intended for the buffer-local `mu4e-headers-found-hook'."
+  "Re-apply overlays on search update."
   (when mu4e-bone--active-reports
-    (remove-overlays (point-min) (point-max) 'mu4e-bone t)
     (mu4e-bone--apply-overlays mu4e-bone--active-reports)))
 
 (defun mu4e-bone--install-pending ()
-  "Install `mu4e-bone--pending-reports' as the active cache in this buffer.
-Runs once on the next `mu4e-headers-found-hook' fire, then detaches."
+  "Install pending reports as active cache in this buffer."
   (remove-hook 'mu4e-headers-found-hook #'mu4e-bone--install-pending)
-  (when-let ((reports mu4e-bone--pending-reports))
+  (when-let* ((reports mu4e-bone--pending-reports))
     (setq mu4e-bone--pending-reports nil)
     (when (derived-mode-p 'mu4e-headers-mode)
       (setq mu4e-bone--active-reports reports)
@@ -556,14 +589,13 @@ Runs once on the next `mu4e-headers-found-hook' fire, then detaches."
       (mu4e-bone--apply-overlays reports))))
 
 (defun mu4e-bone--search-and-watch (reports label)
-  "Search mu for REPORTS' message-ids and install overlays once results land.
-LABEL is appended to the user-facing message (e.g. \" for topic X\")."
+  "Search mu for REPORTS and install overlays once done."
   (setq mu4e-bone--pending-reports reports)
   (add-hook 'mu4e-headers-found-hook #'mu4e-bone--install-pending)
   (mu4e-headers-search (mu4e-bone--build-query reports))
   (message "Searching %d BARK reports%s." (length reports) label))
 
-;;; --- Interactive commands -------------------------------------------------
+;; --- Interactive commands -------------------------------------------------
 
 ;;;###autoload
 (defun mu4e-bone ()
@@ -576,35 +608,35 @@ LABEL is appended to the user-facing message (e.g. \" for topic X\")."
 
 ;;;###autoload
 (defun mu4e-bone-highlight ()
-  "Highlight lines in the current mu4e headers buffer that match BARK reports."
+  "Highlight BARK reports in current headers buffer."
   (interactive)
   (unless (derived-mode-p 'mu4e-headers-mode)
     (user-error "Not in a mu4e-headers buffer"))
   (let ((reports (mu4e-bone--load-all-open-reports)))
     (if (null reports)
         (message "No open BARK reports found.")
-      (remove-overlays (point-min) (point-max) 'mu4e-bone t)
       (setq mu4e-bone--active-reports reports)
       (add-hook 'mu4e-headers-found-hook #'mu4e-bone--rehighlight nil t)
       (mu4e-bone--apply-overlays reports)
       (message "Highlighted %d BARK reports." (length reports)))))
 
 (defun mu4e-bone--collect-topics (reports)
-  "Return sorted list of unique topics from REPORTS."
+  "Sorted list of topics in REPORTS."
   (let ((topics nil))
     (dolist (r reports)
-      (when-let* ((topic (plist-get (cdr r) :topic)))
-        (cl-pushnew topic topics :test #'equal)))
+      (let ((topic (plist-get (cdr r) :topic)))
+        (when topic
+          (cl-pushnew topic topics :test #'equal))))
     (sort (copy-sequence topics) #'string<)))
 
 (defun mu4e-bone--filter-by-topic (reports topic)
-  "Return REPORTS whose :topic equals TOPIC."
+  "Reports matching TOPIC."
   (cl-remove-if-not (lambda (r) (equal (plist-get (cdr r) :topic) topic))
-                     reports))
+                    reports))
 
 ;;;###autoload
 (defun mu4e-bone-topic ()
-  "Like `mu4e-bone', but limited to a single topic."
+  "Search BARK reports filtered by topic."
   (interactive)
   (let* ((reports (mu4e-bone--load-all-open-reports))
          (topics  (mu4e-bone--collect-topics reports)))
@@ -613,10 +645,10 @@ LABEL is appended to the user-facing message (e.g. \" for topic X\")."
      ((null topics)  (message "No topics in any report."))
      (t
       (let* ((topic    (completing-read "BARK topic: " topics nil t))
-             (filtered (and (not (string-empty-p topic))
+             (filtered (and (not (string= topic ""))
                             (mu4e-bone--filter-by-topic reports topic))))
         (cond
-         ((or (string-empty-p topic) (null filtered))
+         ((or (string= topic "") (null filtered))
           (message "No reports for topic \"%s\"." topic))
          (t
           (mu4e-bone--search-and-watch
@@ -624,29 +656,26 @@ LABEL is appended to the user-facing message (e.g. \" for topic X\")."
 
 ;;;###autoload
 (defun mu4e-bone-clear ()
-  "Remove all mu4e-bone overlays and disable auto-rehighlighting."
+  "Remove overlays and disable re-highlighting."
   (interactive)
   (remove-overlays (point-min) (point-max) 'mu4e-bone t)
   (setq mu4e-bone--active-reports nil)
   (remove-hook 'mu4e-headers-found-hook #'mu4e-bone--rehighlight t))
 
-;;; --- Marking commands -----------------------------------------------------
+;; --- Marking commands -----------------------------------------------------
 
 (defun mu4e-bone--current-mid ()
-  "Return current header line's bare message-id, or nil."
+  "Current header line's bare message-id, or nil."
   (when-let* ((msg (ignore-errors (mu4e-message-at-point)))
               (mid (mu4e-message-field msg :message-id)))
     (mu4e-bone--normalize-mid mid)))
 
 (defun mu4e-bone--info-for-mid (mid reports)
-  "Return the info plist for bare MID in REPORTS, or nil."
-  (catch 'found
-    (dolist (r reports)
-      (when (equal (mu4e-bone--normalize-mid (car r)) mid)
-        (throw 'found (cdr r))))))
+  "Return info plist for MID in REPORTS."
+  (cdr (assoc (mu4e-bone--bracketed-mid mid) reports)))
 
 (defun mu4e-bone--action-on-p (state bracketed-mid action)
-  "Return non-nil when ACTION is set for BRACKETED-MID in STATE."
+  "Check if ACTION is set for BRACKETED-MID in STATE."
   (let ((entry (cdr (assoc bracketed-mid state))))
     (pcase action
       (:read   (cdr (assq :read-at entry)))
@@ -654,7 +683,7 @@ LABEL is appended to the user-facing message (e.g. \" for topic X\")."
       (:sticky (eq (cdr (assq :flag entry)) :sticky)))))
 
 (defun mu4e-bone--mark (action on-msg off-msg)
-  "Toggle ACTION on the current message.  Show ON-MSG or OFF-MSG when done."
+  "Toggle ACTION mark, showing ON-MSG or OFF-MSG."
   (let* ((reports (or mu4e-bone--active-reports
                       (mu4e-bone--load-all-open-reports)))
          (mid     (and reports (mu4e-bone--current-mid)))
@@ -674,19 +703,19 @@ LABEL is appended to the user-facing message (e.g. \" for topic X\")."
 
 ;;;###autoload
 (defun mu4e-bone-mark-read ()
-  "Toggle the :read-at timestamp for the current BARK report."
+  "Toggle :read-at timestamp for current report."
   (interactive)
   (mu4e-bone--mark :read "Marked read" "Unmarked read"))
 
 ;;;###autoload
 (defun mu4e-bone-mark-todo ()
-  "Toggle the :todo flag for the current BARK report."
+  "Toggle :todo flag for current report."
   (interactive)
   (mu4e-bone--mark :todo "Marked TODO" "Unmarked TODO"))
 
 ;;;###autoload
 (defun mu4e-bone-mark-sticky ()
-  "Toggle the :sticky flag for the current BARK report."
+  "Toggle :sticky flag for current report."
   (interactive)
   (mu4e-bone--mark :sticky "Marked STICKY" "Unmarked STICKY"))
 
