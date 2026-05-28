@@ -7,10 +7,13 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 
 * Requirements
 
+- The [[https://codeberg.org/bzg/bone.el][bone.el]] library, which provides the shared data layer
+  (configuration, report cache and =state.edn= handling).  Installing
+  =mu4e-bone= from MELPA pulls in this dependency automatically.
 - =~/.config/bone/config.edn= (shared with bone), containing at least a
   =:sources= vector with =:url= entries pointing to =reports.json= files
   (local paths or URLs).
-- =mu4e-bone= supports =reports.json= bark-format =0.9.1=.
+- =mu4e-bone= supports =reports.json= bark-format =0.9.2=.
 - =mu4e-bone= does not call the =bone= binary, it only reads the files
   that =bone= produces. You need to have run =bone= at least once to
   generate =config.edn= and the =reports.json= files.
@@ -28,13 +31,11 @@ The following commands toggle bone's local marks (stored in
 =~/.config/bone/state.edn= and shared with the [[https://codeberg.org/bzg/bone][bone]] CLI and the
 [[https://codeberg.org/bzg/gnus-bone][gnus-bone]] companion).
 
-- =M-x mu4e-bone-mark-read= -- toggle the =:read-at= timestamp on the
-  current report.
-- =M-x mu4e-bone-mark-todo= -- toggle the =:todo= flag.
-- =M-x mu4e-bone-mark-sticky= -- toggle the =:sticky= flag.
+- =M-x mu4e-bone-mark-sticky= -- toggle the sticky mark (keep visible).
+- =M-x mu4e-bone-mark-skip= -- toggle the skip mark (hide).
 
-The annotation gains a leading mark column: =!= for =:todo=, =*= for
-=:sticky=, =r= for =:read-at= (no flag), space otherwise.
+The annotation gains a leading mark column: =*= for sticky, =_= for
+skip, space otherwise.
 
 * Suggested key bindings
 
@@ -50,14 +51,13 @@ The annotation gains a leading mark column: =!= for =:todo=, =*= for
       (define-key m (kbd "h") #'mu4e-bone-highlight)
       (define-key m (kbd "t") #'mu4e-bone-topic)
       (define-key m (kbd "c") #'mu4e-bone-clear)
-      (define-key m (kbd "r") #'mu4e-bone-mark-read)
-      (define-key m (kbd "!") #'mu4e-bone-mark-todo)
       (define-key m (kbd "*") #'mu4e-bone-mark-sticky)
+      (define-key m (kbd "_") #'mu4e-bone-mark-skip)
       m))
   (define-key mu4e-headers-mode-map (kbd "C-c b") mu4e-bone-prefix-map))
 #+end_src
 
-Then =C-c b b= runs =mu4e-bone=, =C-c b != toggles TODO, etc.
+Then =C-c b b= runs =mu4e-bone=, =C-c b *= toggles the sticky mark, etc.
 
 * Annotation format
 
@@ -70,13 +70,13 @@ Each highlighted line is prefixed with a fixed-width annotation:
 : | | |   `-------------- priority (A / B / C)
 : | | `------------------ flags: Acked / Owned / close-reason
 : | `-------------------- type: B(ug), P(atch), ?(request), A(nnouncement), R(elease), C(hange)
-: `---------------------- mark from state.edn (! = TODO, * = sticky, r = read)
+: `---------------------- mark from state.edn (* = sticky, _ = skip)
 
 Concrete example:
 
-: r B AO- A D+3  E+5  [3]
+: * B AO- A D+3  E+5  [3]
 
-reads as: marked read locally, bug, acked + owned + still open,
+reads as: marked sticky locally, bug, acked + owned + still open,
 priority A, deadline in 3 days, expiry in 5 days, 3 votes. (A leading
 minus, e.g. =D-2=, means the date is past.)
 
@@ -91,11 +91,11 @@ You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[ht
 
 * Intentional Versioning
 
-This project uses [[https://intver.org][Intentional Versioning]], here are the three audiences:
+This project uses [[https://intver.org][Intentional Versioning]], with three audiences:
 
-- =x= : end users who use mu4e-bone
-- =y= : external packagers
-- =z= : contributors to the codebase
+- =x=: end users
+- =y=: packagers
+- =z=: contributors to the codebase
 
 * License
 
