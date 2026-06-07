@@ -1,13 +1,13 @@
-;;; mu4e-bone.el --- Highlight BARK reports in mu4e -*- lexical-binding: t; -*-
+;;; mu4e-gnaw.el --- Highlight BONE reports in mu4e -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Bastien Guerry
 ;;
 ;; Author: Bastien Guerry <bzg@gnu.org>
 ;; Maintainer: Bastien Guerry <bzg@gnu.org>
 ;; Keywords: mail
-;; URL: https://codeberg.org/bzg/mu4e-bone
+;; URL: https://codeberg.org/bzg/mu4e-gnaw
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (bone "0.1"))
+;; Package-Requires: ((emacs "28.1") (gnaw "0.1"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -26,27 +26,27 @@
 ;;
 ;;; Commentary:
 ;;
-;; M-x mu4e-bone RET           -- search for open BARK reports and highlight them
-;; M-x mu4e-bone-topic RET     -- same, filtered by topic
-;; M-x mu4e-bone-highlight RET -- highlight matches in the current headers buffer
-;; M-x mu4e-bone-clear RET     -- remove highlights
-;; M-x bone-update RET         -- force update of the remote reports cache
+;; M-x mu4e-gnaw RET           -- search for open BONE reports and highlight them
+;; M-x mu4e-gnaw-topic RET     -- same, filtered by topic
+;; M-x mu4e-gnaw-highlight RET -- highlight matches in the current headers buffer
+;; M-x mu4e-gnaw-clear RET     -- remove highlights
+;; M-x gnaw-update RET         -- force update of the remote reports cache
 ;;
-;; The following commands toggle bone's local marks (kept in
-;; ~/.config/bone/state.edn so they are shared with the bone CLI):
+;; The following commands toggle gnaw's local marks (kept in
+;; ~/.config/gnaw/state.edn so they are shared with the gnaw CLI):
 ;;
-;; M-x mu4e-bone-mark-sticky RET -- toggle the sticky mark (keep visible)
-;; M-x mu4e-bone-mark-skip RET -- toggle the skip mark (hide)
+;; M-x mu4e-gnaw-mark-sticky RET -- toggle the sticky mark (keep visible)
+;; M-x mu4e-gnaw-mark-skip RET -- toggle the skip mark (hide)
 ;;
 ;; The annotation gains a leading mark column: '*' = sticky, '_' = skip.
 ;;
-;; mu4e-bone builds on the `bone' library for the shared data layer
+;; mu4e-gnaw builds on the `gnaw' library for the shared data layer
 ;; (configuration, report sources, cache and state.edn); this file only
 ;; provides the mu4e presentation and commands.
 ;;
 ;;; Code:
 
-(require 'bone)
+(require 'gnaw)
 (require 'cl-lib)
 (require 'subr-x)
 (require 'time-date)
@@ -57,33 +57,33 @@
 (declare-function mu4e-headers-for-each "mu4e-headers")
 (declare-function mu4e-headers-search "mu4e-headers")
 
-(defgroup mu4e-bone nil
-  "Highlight BARK reports in mu4e headers."
+(defgroup mu4e-gnaw nil
+  "Highlight BONE reports in mu4e headers."
   :group 'mu4e)
 
-(defface mu4e-bone-face
+(defface mu4e-gnaw-face
   '((((background light)) :background "#e8e8e8")
     (((background dark))  :background "#333333"))
-  "Subtle highlight for BARK reports in mu4e headers."
-  :group 'mu4e-bone)
+  "Subtle highlight for BONE reports in mu4e headers."
+  :group 'mu4e-gnaw)
 
-(defface mu4e-bone-annotation-face
+(defface mu4e-gnaw-annotation-face
   '((t :inherit shadow))
   "Face for right-margin annotations."
-  :group 'mu4e-bone)
+  :group 'mu4e-gnaw)
 
-(defvar mu4e-bone-votes-width 7
+(defvar mu4e-gnaw-votes-width 7
   "Fixed width for the votes column.")
 
-(defvar mu4e-bone-deadline-width 5
+(defvar mu4e-gnaw-deadline-width 5
   "Fixed width for the deadline column.")
 
-(defvar mu4e-bone-expiry-width 5
+(defvar mu4e-gnaw-expiry-width 5
   "Fixed width for the expiry column.")
 
 ;; --- Message-id helpers ---------------------------------------------------
 
-(defun mu4e-bone--bare-mid (mid)
+(defun mu4e-gnaw--bare-mid (mid)
   "Strip surrounding angle brackets from MID."
   (let ((s (or mid "")))
     (if (and (string-prefix-p "<" s) (string-suffix-p ">" s))
@@ -92,7 +92,7 @@
 
 ;; --- Annotation formatting ------------------------------------------------
 
-(defun mu4e-bone--mark-prefix (entry)
+(defun mu4e-gnaw--mark-prefix (entry)
   "Get mark char for state ENTRY."
   (let ((flag (cdr (assq :flag entry)))
         (skip (cdr (assq :skip-since entry))))
@@ -101,7 +101,7 @@
      (skip "_")
      (t " "))))
 
-(defun mu4e-bone--type-letter (type)
+(defun mu4e-gnaw--type-letter (type)
   "Get letter abbreviation for TYPE."
   (pcase type
     ("bug"          "B")
@@ -112,130 +112,130 @@
     ("change"       "C")
     (_              "·")))
 
-(defun mu4e-bone--deadline-days (deadline)
+(defun mu4e-gnaw--deadline-days (deadline)
   "Days until YYYY-MM-DD DEADLINE."
   (when deadline
     (let* ((dl (date-to-time (concat deadline " 00:00:00")))
            (diff (float-time (time-subtract dl (current-time)))))
       (ceiling (/ diff 86400.0)))))
 
-(defun mu4e-bone--annotation (info &optional entry)
+(defun mu4e-gnaw--annotation (info &optional entry)
   "Build annotation string for report INFO and state ENTRY."
-  (let* ((mark     (mu4e-bone--mark-prefix entry))
-         (type     (mu4e-bone--type-letter (plist-get info :type)))
+  (let* ((mark     (mu4e-gnaw--mark-prefix entry))
+         (type     (mu4e-gnaw--type-letter (plist-get info :type)))
          (flags    (plist-get info :flags))
          (priority (plist-get info :priority))
          (votes    (plist-get info :votes))
          (deadline (plist-get info :deadline))
          (expiry   (plist-get info :expiry))
-         (dl-days  (mu4e-bone--deadline-days deadline))
-         (ex-days  (mu4e-bone--deadline-days expiry))
+         (dl-days  (mu4e-gnaw--deadline-days deadline))
+         (ex-days  (mu4e-gnaw--deadline-days expiry))
          (pri-str  (pcase priority (3 "A") (2 "B") (1 "C") (_ " ")))
          (dl-str   (if dl-days (format "D%+d" dl-days) ""))
-         (dl-pad   (string-pad dl-str mu4e-bone-deadline-width))
+         (dl-pad   (string-pad dl-str mu4e-gnaw-deadline-width))
          (ex-str   (if ex-days (format "E%+d" ex-days) ""))
-         (ex-pad   (string-pad ex-str mu4e-bone-expiry-width))
+         (ex-pad   (string-pad ex-str mu4e-gnaw-expiry-width))
          (votes-str (if votes (format "[%s]" votes) ""))
-         (votes-pad (string-pad votes-str mu4e-bone-votes-width)))
+         (votes-pad (string-pad votes-str mu4e-gnaw-votes-width)))
     (concat mark " " type " " flags " " pri-str " " dl-pad ex-pad votes-pad)))
 
 ;; --- Query building -------------------------------------------------------
 
-(defun mu4e-bone--build-query (reports)
+(defun mu4e-gnaw--build-query (reports)
   "Build query string for REPORTS."
   (mapconcat (lambda (r)
-               (format "msgid:%s" (mu4e-bone--bare-mid (car r))))
+               (format "msgid:%s" (mu4e-gnaw--bare-mid (car r))))
              reports
              " OR "))
 
-(defun mu4e-bone--build-mid-map (reports)
+(defun mu4e-gnaw--build-mid-map (reports)
   "Build mapping from bare message-id to info for REPORTS."
   (let ((ht (make-hash-table :test 'equal)))
     (dolist (r reports)
-      (puthash (mu4e-bone--bare-mid (car r)) (cdr r) ht))
+      (puthash (mu4e-gnaw--bare-mid (car r)) (cdr r) ht))
     ht))
 
 ;; --- Overlay highlighting -------------------------------------------------
 
-(defvar-local mu4e-bone--active-reports nil
-  "Buffer-local cache of BARK reports for auto-rehighlighting.")
+(defvar-local mu4e-gnaw--active-reports nil
+  "Buffer-local cache of BONE reports for auto-rehighlighting.")
 
-(defvar mu4e-bone--pending-reports nil
+(defvar mu4e-gnaw--pending-reports nil
   "Global pending reports awaiting next search finish.")
 
-(defun mu4e-bone--apply-overlays (reports)
+(defun mu4e-gnaw--apply-overlays (reports)
   "Apply overlays for REPORTS in the current `mu4e-headers-mode' buffer."
-  (remove-overlays (point-min) (point-max) 'mu4e-bone t)
+  (remove-overlays (point-min) (point-max) 'mu4e-gnaw t)
   (when (derived-mode-p 'mu4e-headers-mode)
-    (let ((id-map (mu4e-bone--build-mid-map reports))
-          (state  (bone-read-state)))
+    (let ((id-map (mu4e-gnaw--build-mid-map reports))
+          (state  (gnaw-read-state)))
       (mu4e-headers-for-each
        (lambda (msg)
          (when-let* ((raw  (mu4e-message-field msg :message-id))
-                     (mid  (mu4e-bone--bare-mid raw))
+                     (mid  (mu4e-gnaw--bare-mid raw))
                      (info (gethash mid id-map)))
-           (let* ((entry   (cdr (assoc (bone-normalize-mid mid) state)))
+           (let* ((entry   (cdr (assoc (gnaw-normalize-mid mid) state)))
                   (bol     (line-beginning-position))
                   (eol     (line-end-position))
-                  (ann-str (mu4e-bone--annotation info entry))
+                  (ann-str (mu4e-gnaw--annotation info entry))
                   (p3      (= 3 (plist-get info :priority)))
-                  (face    (if p3 '(mu4e-bone-face bold) 'mu4e-bone-face))
+                  (face    (if p3 '(mu4e-gnaw-face bold) 'mu4e-gnaw-face))
                   (ov      (make-overlay bol eol)))
              (overlay-put ov 'face face)
-             (overlay-put ov 'mu4e-bone t)
+             (overlay-put ov 'mu4e-gnaw t)
              (overlay-put ov 'before-string
                           (propertize (concat ann-str " ")
-                                      'face 'mu4e-bone-annotation-face)))))))))
+                                      'face 'mu4e-gnaw-annotation-face)))))))))
 
-(defun mu4e-bone--rehighlight ()
+(defun mu4e-gnaw--rehighlight ()
   "Re-apply overlays on search update."
-  (when mu4e-bone--active-reports
-    (mu4e-bone--apply-overlays mu4e-bone--active-reports)))
+  (when mu4e-gnaw--active-reports
+    (mu4e-gnaw--apply-overlays mu4e-gnaw--active-reports)))
 
-(defun mu4e-bone--install-pending ()
+(defun mu4e-gnaw--install-pending ()
   "Install pending reports as active cache in this buffer."
-  (remove-hook 'mu4e-headers-found-hook #'mu4e-bone--install-pending)
-  (when-let* ((reports mu4e-bone--pending-reports))
-    (setq mu4e-bone--pending-reports nil)
+  (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
+  (when-let* ((reports mu4e-gnaw--pending-reports))
+    (setq mu4e-gnaw--pending-reports nil)
     (when (derived-mode-p 'mu4e-headers-mode)
-      (setq mu4e-bone--active-reports reports)
-      (add-hook 'mu4e-headers-found-hook #'mu4e-bone--rehighlight nil t)
-      (mu4e-bone--apply-overlays reports))))
+      (setq mu4e-gnaw--active-reports reports)
+      (add-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight nil t)
+      (mu4e-gnaw--apply-overlays reports))))
 
-(defun mu4e-bone--search-and-watch (reports label)
+(defun mu4e-gnaw--search-and-watch (reports label)
   "Search mu for REPORTS and install overlays once done.
 LABEL annotates the status message."
-  (setq mu4e-bone--pending-reports reports)
-  (add-hook 'mu4e-headers-found-hook #'mu4e-bone--install-pending)
-  (mu4e-headers-search (mu4e-bone--build-query reports))
-  (message "Searching %d BARK reports%s." (length reports) label))
+  (setq mu4e-gnaw--pending-reports reports)
+  (add-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
+  (mu4e-headers-search (mu4e-gnaw--build-query reports))
+  (message "Searching %d BONE reports%s." (length reports) label))
 
 ;; --- Interactive commands -------------------------------------------------
 
 ;;;###autoload
-(defun mu4e-bone ()
-  "Search mu4e for open BARK reports and highlight them."
+(defun mu4e-gnaw ()
+  "Search mu4e for open BONE reports and highlight them."
   (interactive)
-  (let ((reports (bone-reports)))
+  (let ((reports (gnaw-reports)))
     (if (null reports)
-        (message "No open BARK reports found.")
-      (mu4e-bone--search-and-watch reports ""))))
+        (message "No open BONE reports found.")
+      (mu4e-gnaw--search-and-watch reports ""))))
 
 ;;;###autoload
-(defun mu4e-bone-highlight ()
-  "Highlight BARK reports in current headers buffer."
+(defun mu4e-gnaw-highlight ()
+  "Highlight BONE reports in current headers buffer."
   (interactive)
   (unless (derived-mode-p 'mu4e-headers-mode)
     (user-error "Not in a mu4e-headers buffer"))
-  (let ((reports (bone-reports)))
+  (let ((reports (gnaw-reports)))
     (if (null reports)
-        (message "No open BARK reports found.")
-      (setq mu4e-bone--active-reports reports)
-      (add-hook 'mu4e-headers-found-hook #'mu4e-bone--rehighlight nil t)
-      (mu4e-bone--apply-overlays reports)
-      (message "Highlighted %d BARK reports." (length reports)))))
+        (message "No open BONE reports found.")
+      (setq mu4e-gnaw--active-reports reports)
+      (add-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight nil t)
+      (mu4e-gnaw--apply-overlays reports)
+      (message "Highlighted %d BONE reports." (length reports)))))
 
-(defun mu4e-bone--collect-topics (reports)
+(defun mu4e-gnaw--collect-topics (reports)
   "Sorted list of topics in REPORTS."
   (let ((topics nil))
     (dolist (r reports)
@@ -244,88 +244,88 @@ LABEL annotates the status message."
           (cl-pushnew topic topics :test #'equal))))
     (sort (copy-sequence topics) #'string<)))
 
-(defun mu4e-bone--filter-by-topic (reports topic)
+(defun mu4e-gnaw--filter-by-topic (reports topic)
   "Return REPORTS matching TOPIC."
   (cl-remove-if-not (lambda (r) (equal (plist-get (cdr r) :topic) topic))
                     reports))
 
 ;;;###autoload
-(defun mu4e-bone-topic ()
-  "Search BARK reports filtered by topic."
+(defun mu4e-gnaw-topic ()
+  "Search BONE reports filtered by topic."
   (interactive)
-  (let* ((reports (bone-reports))
-         (topics  (mu4e-bone--collect-topics reports)))
+  (let* ((reports (gnaw-reports))
+         (topics  (mu4e-gnaw--collect-topics reports)))
     (cond
-     ((null reports) (message "No open BARK reports found."))
+     ((null reports) (message "No open BONE reports found."))
      ((null topics)  (message "No topics in any report."))
      (t
-      (let* ((topic    (completing-read "BARK topic: " topics nil t))
+      (let* ((topic    (completing-read "BONE topic: " topics nil t))
              (filtered (and (not (string= topic ""))
-                            (mu4e-bone--filter-by-topic reports topic))))
+                            (mu4e-gnaw--filter-by-topic reports topic))))
         (cond
          ((or (string= topic "") (null filtered))
           (message "No reports for topic \"%s\"." topic))
          (t
-          (mu4e-bone--search-and-watch
+          (mu4e-gnaw--search-and-watch
            filtered (format " for topic \"%s\"" topic)))))))))
 
 ;;;###autoload
-(defun mu4e-bone-clear ()
+(defun mu4e-gnaw-clear ()
   "Remove overlays and disable re-highlighting."
   (interactive)
-  (remove-overlays (point-min) (point-max) 'mu4e-bone t)
-  (setq mu4e-bone--active-reports nil)
-  (remove-hook 'mu4e-headers-found-hook #'mu4e-bone--rehighlight t))
+  (remove-overlays (point-min) (point-max) 'mu4e-gnaw t)
+  (setq mu4e-gnaw--active-reports nil)
+  (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight t))
 
 ;; --- Marking commands -----------------------------------------------------
 
-(defun mu4e-bone--current-mid ()
+(defun mu4e-gnaw--current-mid ()
   "Current header line's bare message-id, or nil."
   (when-let* ((msg (ignore-errors (mu4e-message-at-point)))
               (mid (mu4e-message-field msg :message-id)))
-    (mu4e-bone--bare-mid mid)))
+    (mu4e-gnaw--bare-mid mid)))
 
-(defun mu4e-bone--info-for-mid (mid reports)
+(defun mu4e-gnaw--info-for-mid (mid reports)
   "Return info plist for MID in REPORTS."
-  (cdr (assoc (bone-normalize-mid mid) reports)))
+  (cdr (assoc (gnaw-normalize-mid mid) reports)))
 
-(defun mu4e-bone--mark (action on-msg off-msg)
+(defun mu4e-gnaw--mark (action on-msg off-msg)
   "Toggle ACTION mark, showing ON-MSG or OFF-MSG."
-  (let* ((reports (or mu4e-bone--active-reports (bone-reports)))
-         (mid     (and reports (mu4e-bone--current-mid)))
-         (info    (and mid (mu4e-bone--info-for-mid mid reports))))
+  (let* ((reports (or mu4e-gnaw--active-reports (gnaw-reports)))
+         (mid     (and reports (mu4e-gnaw--current-mid)))
+         (info    (and mid (mu4e-gnaw--info-for-mid mid reports))))
     (cond
-     ((null reports) (user-error "No BARK reports loaded"))
+     ((null reports) (user-error "No BONE reports loaded"))
      ((null mid)     (user-error "No message-id on current line"))
-     ((null info)    (user-error "Current message is not a BARK report: %s" mid))
+     ((null info)    (user-error "Current message is not a BONE report: %s" mid))
      (t
-      (let ((on (bone-toggle-mark (bone-normalize-mid mid) info action)))
-        (mu4e-bone--rehighlight)
+      (let ((on (gnaw-toggle-mark (gnaw-normalize-mid mid) info action)))
+        (mu4e-gnaw--rehighlight)
         (message "%s" (if on on-msg off-msg)))))))
 
 ;;;###autoload
-(defun mu4e-bone-mark-sticky ()
+(defun mu4e-gnaw-mark-sticky ()
   "Toggle the sticky mark (keep visible) for the current report."
   (interactive)
-  (mu4e-bone--mark :sticky "Marked sticky" "Unmarked sticky"))
+  (mu4e-gnaw--mark :sticky "Marked sticky" "Unmarked sticky"))
 
 ;;;###autoload
-(defun mu4e-bone-mark-skip ()
+(defun mu4e-gnaw-mark-skip ()
   "Toggle the skip mark (hide) for the current report."
   (interactive)
-  (mu4e-bone--mark :skip "Skipped" "Unskipped"))
+  (mu4e-gnaw--mark :skip "Skipped" "Unskipped"))
 
 ;; --- Cache update hooks ----------------------------------------------------
 
-(defun mu4e-bone--refresh-all-buffers ()
-  "Refresh mu4e-bone overlays in all headers buffers."
+(defun mu4e-gnaw--refresh-all-buffers ()
+  "Refresh mu4e-gnaw overlays in all headers buffers."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
       (when (and (derived-mode-p 'mu4e-headers-mode)
-                 mu4e-bone--active-reports)
-        (mu4e-bone--apply-overlays mu4e-bone--active-reports)))))
+                 mu4e-gnaw--active-reports)
+        (mu4e-gnaw--apply-overlays mu4e-gnaw--active-reports)))))
 
-(add-hook 'bone-after-update-hook #'mu4e-bone--refresh-all-buffers)
+(add-hook 'gnaw-after-update-hook #'mu4e-gnaw--refresh-all-buffers)
 
-(provide 'mu4e-bone)
-;;; mu4e-bone.el ends here
+(provide 'mu4e-gnaw)
+;;; mu4e-gnaw.el ends here
