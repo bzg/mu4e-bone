@@ -26,6 +26,9 @@
 ;;
 ;;; Commentary:
 ;;
+;; This library is not actively maintained, it is shared as a proof of
+;; concept.  If you want to maintain and develop it, please contact me.
+;;
 ;; M-x mu4e-gnaw RET           -- search for open BONE reports and highlight them
 ;; M-x mu4e-gnaw-topic RET     -- same, filtered by topic
 ;; M-x mu4e-gnaw-highlight RET -- highlight matches in the current headers buffer
