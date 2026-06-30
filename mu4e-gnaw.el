@@ -7,7 +7,7 @@
 ;; Keywords: mail
 ;; URL: https://codeberg.org/bzg/mu4e-gnaw
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (gnaw "0.1"))
+;; Package-Requires: ((emacs "28.1") (gnaw "0.2"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -39,9 +39,9 @@
 ;; ~/.config/gnaw/state.edn so they are shared with the gnaw CLI):
 ;;
 ;; M-x mu4e-gnaw-mark-sticky RET -- toggle the sticky mark (keep visible)
-;; M-x mu4e-gnaw-mark-skip RET -- toggle the skip mark (hide)
+;; M-x mu4e-gnaw-mark-dismiss RET -- toggle the dismiss mark (hide)
 ;;
-;; The annotation gains a leading mark column: '*' = sticky, '_' = skip.
+;; The annotation gains a leading mark column: '*' = sticky, 'd' = dismiss.
 ;;
 ;; mu4e-gnaw builds on the `gnaw' library for the shared data layer
 ;; (configuration, report sources, cache and state.edn); this file only
@@ -50,9 +50,7 @@
 ;;; Code:
 
 (require 'gnaw)
-(require 'cl-lib)
 (require 'subr-x)
-(require 'time-date)
 (require 'mu4e)
 
 (declare-function mu4e-message-at-point "mu4e-message")
@@ -72,17 +70,8 @@
 
 (defface mu4e-gnaw-annotation-face
   '((t :inherit shadow))
-  "Face for right-margin annotations."
+  "Face for the report annotation prefixing highlighted lines."
   :group 'mu4e-gnaw)
-
-(defvar mu4e-gnaw-votes-width 7
-  "Fixed width for the votes column.")
-
-(defvar mu4e-gnaw-deadline-width 5
-  "Fixed width for the deadline column.")
-
-(defvar mu4e-gnaw-expiry-width 5
-  "Fixed width for the expiry column.")
 
 ;; --- Message-id helpers ---------------------------------------------------
 
@@ -92,55 +81,6 @@
     (if (and (string-prefix-p "<" s) (string-suffix-p ">" s))
         (substring s 1 -1)
       s)))
-
-;; --- Annotation formatting ------------------------------------------------
-
-(defun mu4e-gnaw--mark-prefix (entry)
-  "Get mark char for state ENTRY."
-  (let ((flag (cdr (assq :flag entry)))
-        (skip (cdr (assq :skip-since entry))))
-    (cond
-     ((eq flag :sticky) "*")
-     (skip "_")
-     (t " "))))
-
-(defun mu4e-gnaw--type-letter (type)
-  "Get letter abbreviation for TYPE."
-  (pcase type
-    ("bug"          "B")
-    ("patch"        "P")
-    ("request"      "?")
-    ("announcement" "A")
-    ("release"      "R")
-    ("change"       "C")
-    (_              "·")))
-
-(defun mu4e-gnaw--deadline-days (deadline)
-  "Days until YYYY-MM-DD DEADLINE."
-  (when deadline
-    (let* ((dl (date-to-time (concat deadline " 00:00:00")))
-           (diff (float-time (time-subtract dl (current-time)))))
-      (ceiling (/ diff 86400.0)))))
-
-(defun mu4e-gnaw--annotation (info &optional entry)
-  "Build annotation string for report INFO and state ENTRY."
-  (let* ((mark     (mu4e-gnaw--mark-prefix entry))
-         (type     (mu4e-gnaw--type-letter (plist-get info :type)))
-         (flags    (plist-get info :flags))
-         (priority (plist-get info :priority))
-         (votes    (plist-get info :votes))
-         (deadline (plist-get info :deadline))
-         (expiry   (plist-get info :expiry))
-         (dl-days  (mu4e-gnaw--deadline-days deadline))
-         (ex-days  (mu4e-gnaw--deadline-days expiry))
-         (pri-str  (pcase priority (3 "A") (2 "B") (1 "C") (_ " ")))
-         (dl-str   (if dl-days (format "D%+d" dl-days) ""))
-         (dl-pad   (string-pad dl-str mu4e-gnaw-deadline-width))
-         (ex-str   (if ex-days (format "E%+d" ex-days) ""))
-         (ex-pad   (string-pad ex-str mu4e-gnaw-expiry-width))
-         (votes-str (if votes (format "[%s]" votes) ""))
-         (votes-pad (string-pad votes-str mu4e-gnaw-votes-width)))
-    (concat mark " " type " " flags " " pri-str " " dl-pad ex-pad votes-pad)))
 
 ;; --- Query building -------------------------------------------------------
 
@@ -180,7 +120,7 @@
            (let* ((entry   (cdr (assoc (gnaw-normalize-mid mid) state)))
                   (bol     (line-beginning-position))
                   (eol     (line-end-position))
-                  (ann-str (mu4e-gnaw--annotation info entry))
+                  (ann-str (gnaw-annotation info entry))
                   (p3      (= 3 (plist-get info :priority)))
                   (face    (if p3 '(mu4e-gnaw-face bold) 'mu4e-gnaw-face))
                   (ov      (make-overlay bol eol)))
@@ -238,33 +178,19 @@ LABEL annotates the status message."
       (mu4e-gnaw--apply-overlays reports)
       (message "Highlighted %d BONE reports." (length reports)))))
 
-(defun mu4e-gnaw--collect-topics (reports)
-  "Sorted list of topics in REPORTS."
-  (let ((topics nil))
-    (dolist (r reports)
-      (let ((topic (plist-get (cdr r) :topic)))
-        (when topic
-          (cl-pushnew topic topics :test #'equal))))
-    (sort (copy-sequence topics) #'string<)))
-
-(defun mu4e-gnaw--filter-by-topic (reports topic)
-  "Return REPORTS matching TOPIC."
-  (cl-remove-if-not (lambda (r) (equal (plist-get (cdr r) :topic) topic))
-                    reports))
-
 ;;;###autoload
 (defun mu4e-gnaw-topic ()
   "Search BONE reports filtered by topic."
   (interactive)
   (let* ((reports (gnaw-reports))
-         (topics  (mu4e-gnaw--collect-topics reports)))
+         (topics  (gnaw-topics reports)))
     (cond
      ((null reports) (message "No open BONE reports found."))
      ((null topics)  (message "No topics in any report."))
      (t
       (let* ((topic    (completing-read "BONE topic: " topics nil t))
              (filtered (and (not (string= topic ""))
-                            (mu4e-gnaw--filter-by-topic reports topic))))
+                            (gnaw-filter-by-topic reports topic))))
         (cond
          ((or (string= topic "") (null filtered))
           (message "No reports for topic \"%s\"." topic))
@@ -274,11 +200,15 @@ LABEL annotates the status message."
 
 ;;;###autoload
 (defun mu4e-gnaw-clear ()
-  "Remove overlays and disable re-highlighting."
+  "Remove overlays, disable re-highlighting, and cancel any pending install."
   (interactive)
   (remove-overlays (point-min) (point-max) 'mu4e-gnaw t)
   (setq mu4e-gnaw--active-reports nil)
-  (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight t))
+  (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight t)
+  ;; Cancel an in-flight search watch so its (global) found-hook cannot fire
+  ;; later against an unrelated search.
+  (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
+  (setq mu4e-gnaw--pending-reports nil))
 
 ;; --- Marking commands -----------------------------------------------------
 
@@ -313,20 +243,22 @@ LABEL annotates the status message."
   (mu4e-gnaw--mark :sticky "Marked sticky" "Unmarked sticky"))
 
 ;;;###autoload
-(defun mu4e-gnaw-mark-skip ()
-  "Toggle the skip mark (hide) for the current report."
+(defun mu4e-gnaw-mark-dismiss ()
+  "Toggle the dismiss mark (hide) for the current report."
   (interactive)
-  (mu4e-gnaw--mark :skip "Skipped" "Unskipped"))
+  (mu4e-gnaw--mark :dismiss "Dismissed" "Undismissed"))
 
 ;; --- Cache update hooks ----------------------------------------------------
 
 (defun mu4e-gnaw--refresh-all-buffers ()
-  "Refresh mu4e-gnaw overlays in all headers buffers."
-  (dolist (buf (buffer-list))
-    (with-current-buffer buf
-      (when (and (derived-mode-p 'mu4e-headers-mode)
-                 mu4e-gnaw--active-reports)
-        (mu4e-gnaw--apply-overlays mu4e-gnaw--active-reports)))))
+  "Reload reports from the refreshed cache and re-apply overlays."
+  (let ((reports (gnaw-reports)))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'mu4e-headers-mode)
+                   mu4e-gnaw--active-reports)
+          (setq mu4e-gnaw--active-reports reports)
+          (mu4e-gnaw--apply-overlays reports))))))
 
 (add-hook 'gnaw-after-update-hook #'mu4e-gnaw--refresh-all-buffers)
 

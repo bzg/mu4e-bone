@@ -15,12 +15,14 @@ open [[https://codeberg.org/bzg/bone][BONE]] report. It reads the same =reports.
   =mu4e-gnaw= is on MELPA this dependency will be pulled in
   automatically; until then, see /Installation/ below.
 - =~/.config/gnaw/config.edn= (shared with gnaw), containing at least a
-  =:sources= vector with =:url= entries pointing to =reports.json= files
-  (local paths or URLs).
-- =mu4e-gnaw= supports =reports.json= bone-format =0.9.2=.
+  =:sources= vector with =:urls= entries pointing to =reports.json=
+  files (local paths or URLs).
 - =mu4e-gnaw= does not call the =gnaw= binary, it only reads the files
-  that =gnaw= produces. You need to have run =gnaw= at least once to
-  generate =config.edn= and the =reports.json= files.
+  that =gnaw= produces (=M-x gnaw-add-source= can create =config.edn=
+  for you).
+
+Report parsing is done by [[https://codeberg.org/bzg/gnaw.el][gnaw.el]]; see its requirements for the
+supported =reports.json= bone-format.
 
 * Installation
 
@@ -54,14 +56,14 @@ to be already available (it usually ships with =mu=).
 ** Local marks
 
 The following commands toggle gnaw's local marks (stored in
-=~/.config/gnaw/state.edn= and shared with the [[https://codeberg.org/bzg/gnaw][gnaw]] CLI and the
-[[https://codeberg.org/bzg/gnus-gnaw][gnus-gnaw]] companion).
+=~/.config/gnaw/state.edn= and shared with the [[https://codeberg.org/bzg/gnaw][gnaw]] CLI, =M-x gnaw= and
+the other mail front-ends).
 
 - =M-x mu4e-gnaw-mark-sticky= -- toggle the sticky mark (keep visible).
-- =M-x mu4e-gnaw-mark-skip= -- toggle the skip mark (hide).
+- =M-x mu4e-gnaw-mark-dismiss= -- toggle the dismiss mark (hide).
 
-The annotation gains a leading mark column: =*= for sticky, =_= for
-skip, space otherwise.
+The annotation gains a leading mark column: =*= for sticky, =d= for
+dismiss, space otherwise.
 
 * Suggested key bindings
 
@@ -78,7 +80,7 @@ skip, space otherwise.
       (define-key m (kbd "t") #'mu4e-gnaw-topic)
       (define-key m (kbd "c") #'mu4e-gnaw-clear)
       (define-key m (kbd "*") #'mu4e-gnaw-mark-sticky)
-      (define-key m (kbd "_") #'mu4e-gnaw-mark-skip)
+      (define-key m (kbd "d") #'mu4e-gnaw-mark-dismiss)
       m))
   (define-key mu4e-headers-mode-map (kbd "C-c b") mu4e-gnaw-prefix-map))
 #+end_src
@@ -96,7 +98,7 @@ Each highlighted line is prefixed with a fixed-width annotation:
 : | | |   `-------------- priority (A / B / C)
 : | | `------------------ flags: Acked / Owned / close-reason
 : | `-------------------- type: B(ug), P(atch), ?(request), A(nnouncement), R(elease), C(hange)
-: `---------------------- mark from state.edn (* = sticky, _ = skip)
+: `---------------------- mark from state.edn (* = sticky, d = dismiss)
 
 Concrete example:
 
