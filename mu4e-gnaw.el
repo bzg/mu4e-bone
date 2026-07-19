@@ -7,7 +7,7 @@
 ;; Keywords: mail
 ;; URL: https://codeberg.org/bzg/mu4e-gnaw
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (gnaw "0.2"))
+;; Package-Requires: ((emacs "28.1") (gnaw "0.3"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -41,7 +41,7 @@
 ;; M-x mu4e-gnaw-mark-sticky RET -- toggle the sticky mark (keep visible)
 ;; M-x mu4e-gnaw-mark-dismiss RET -- toggle the dismiss mark (hide)
 ;;
-;; The annotation gains a leading mark column: '*' = sticky, 'd' = dismiss.
+;; The annotation gains a leading mark column: '!' = sticky, 'd' = dismiss.
 ;;
 ;; mu4e-gnaw builds on the `gnaw' library for the shared data layer
 ;; (configuration, report sources, cache and state.edn); this file only
@@ -103,8 +103,14 @@
 (defvar-local mu4e-gnaw--active-reports nil
   "Buffer-local cache of BONE reports for auto-rehighlighting.")
 
+(defvar-local mu4e-gnaw--active-topic nil
+  "Topic filtering the buffer's reports, or nil for all reports.")
+
 (defvar mu4e-gnaw--pending-reports nil
   "Global pending reports awaiting next search finish.")
+
+(defvar mu4e-gnaw--pending-topic nil
+  "Topic filter accompanying `mu4e-gnaw--pending-reports', or nil.")
 
 (defun mu4e-gnaw--apply-overlays (reports)
   "Apply overlays for REPORTS in the current `mu4e-headers-mode' buffer."
@@ -121,8 +127,9 @@
                   (bol     (line-beginning-position))
                   (eol     (line-end-position))
                   (ann-str (gnaw-annotation info entry))
-                  (p3      (= 3 (plist-get info :priority)))
-                  (face    (if p3 '(mu4e-gnaw-face bold) 'mu4e-gnaw-face))
+                  (top     (equal "A" (gnaw-priority-letter
+                                       (plist-get info :priority))))
+                  (face    (if top '(mu4e-gnaw-face bold) 'mu4e-gnaw-face))
                   (ov      (make-overlay bol eol)))
              (overlay-put ov 'face face)
              (overlay-put ov 'mu4e-gnaw t)
@@ -138,19 +145,31 @@
 (defun mu4e-gnaw--install-pending ()
   "Install pending reports as active cache in this buffer."
   (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
-  (when-let* ((reports mu4e-gnaw--pending-reports))
-    (setq mu4e-gnaw--pending-reports nil)
-    (when (derived-mode-p 'mu4e-headers-mode)
-      (setq mu4e-gnaw--active-reports reports)
+  (let ((reports mu4e-gnaw--pending-reports)
+        (topic   mu4e-gnaw--pending-topic))
+    (setq mu4e-gnaw--pending-reports nil
+          mu4e-gnaw--pending-topic nil)
+    (when (and reports (derived-mode-p 'mu4e-headers-mode))
+      (setq mu4e-gnaw--active-reports reports
+            mu4e-gnaw--active-topic topic)
       (add-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight nil t)
       (mu4e-gnaw--apply-overlays reports))))
 
-(defun mu4e-gnaw--search-and-watch (reports label)
+(defun mu4e-gnaw--search-and-watch (reports label &optional topic)
   "Search mu for REPORTS and install overlays once done.
-LABEL annotates the status message."
-  (setq mu4e-gnaw--pending-reports reports)
+LABEL annotates the status message; TOPIC records the topic filter
+producing REPORTS, if any.  A search that fails to start uninstalls
+the global found-hook so it cannot fire on an unrelated search."
+  (setq mu4e-gnaw--pending-reports reports
+        mu4e-gnaw--pending-topic topic)
   (add-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
-  (mu4e-headers-search (mu4e-gnaw--build-query reports))
+  (condition-case err
+      (mu4e-headers-search (mu4e-gnaw--build-query reports))
+    (error
+     (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
+     (setq mu4e-gnaw--pending-reports nil
+           mu4e-gnaw--pending-topic nil)
+     (signal (car err) (cdr err))))
   (message "Searching %d BONE reports%s." (length reports) label))
 
 ;; --- Interactive commands -------------------------------------------------
@@ -173,7 +192,8 @@ LABEL annotates the status message."
   (let ((reports (gnaw-reports)))
     (if (null reports)
         (message "No open BONE reports found.")
-      (setq mu4e-gnaw--active-reports reports)
+      (setq mu4e-gnaw--active-reports reports
+            mu4e-gnaw--active-topic nil)
       (add-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight nil t)
       (mu4e-gnaw--apply-overlays reports)
       (message "Highlighted %d BONE reports." (length reports)))))
@@ -196,19 +216,21 @@ LABEL annotates the status message."
           (message "No reports for topic \"%s\"." topic))
          (t
           (mu4e-gnaw--search-and-watch
-           filtered (format " for topic \"%s\"" topic)))))))))
+           filtered (format " for topic \"%s\"" topic) topic))))))))
 
 ;;;###autoload
 (defun mu4e-gnaw-clear ()
   "Remove overlays, disable re-highlighting, and cancel any pending install."
   (interactive)
   (remove-overlays (point-min) (point-max) 'mu4e-gnaw t)
-  (setq mu4e-gnaw--active-reports nil)
+  (setq mu4e-gnaw--active-reports nil
+        mu4e-gnaw--active-topic nil)
   (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--rehighlight t)
   ;; Cancel an in-flight search watch so its (global) found-hook cannot fire
   ;; later against an unrelated search.
   (remove-hook 'mu4e-headers-found-hook #'mu4e-gnaw--install-pending)
-  (setq mu4e-gnaw--pending-reports nil))
+  (setq mu4e-gnaw--pending-reports nil
+        mu4e-gnaw--pending-topic nil))
 
 ;; --- Marking commands -----------------------------------------------------
 
@@ -251,14 +273,18 @@ LABEL annotates the status message."
 ;; --- Cache update hooks ----------------------------------------------------
 
 (defun mu4e-gnaw--refresh-all-buffers ()
-  "Reload reports from the refreshed cache and re-apply overlays."
+  "Reload reports from the refreshed cache and re-apply overlays.
+A buffer set up by `mu4e-gnaw-topic' keeps its topic filter."
   (let ((reports (gnaw-reports)))
     (dolist (buf (buffer-list))
       (with-current-buffer buf
         (when (and (derived-mode-p 'mu4e-headers-mode)
                    mu4e-gnaw--active-reports)
-          (setq mu4e-gnaw--active-reports reports)
-          (mu4e-gnaw--apply-overlays reports))))))
+          (setq mu4e-gnaw--active-reports
+                (if mu4e-gnaw--active-topic
+                    (gnaw-filter-by-topic reports mu4e-gnaw--active-topic)
+                  reports))
+          (mu4e-gnaw--apply-overlays mu4e-gnaw--active-reports))))))
 
 (add-hook 'gnaw-after-update-hook #'mu4e-gnaw--refresh-all-buffers)
 

@@ -62,7 +62,7 @@ the other mail front-ends).
 - =M-x mu4e-gnaw-mark-sticky= -- toggle the sticky mark (keep visible).
 - =M-x mu4e-gnaw-mark-dismiss= -- toggle the dismiss mark (hide).
 
-The annotation gains a leading mark column: =*= for sticky, =d= for
+The annotation gains a leading mark column: =!= for sticky, =d= for
 dismiss, space otherwise.
 
 * Suggested key bindings
@@ -98,11 +98,11 @@ Each highlighted line is prefixed with a fixed-width annotation:
 : | | |   `-------------- priority (A / B / C)
 : | | `------------------ flags: Acked / Owned / close-reason
 : | `-------------------- type: B(ug), P(atch), ?(request), A(nnouncement), R(elease), C(hange)
-: `---------------------- mark from state.edn (* = sticky, d = dismiss)
+: `---------------------- mark from state.edn (! = sticky, d = dismiss)
 
 Concrete example:
 
-: * B AO- A D+3  E+5  [3]
+: ! B AO- A D+3  E+5  [3]
 
 reads as: marked sticky locally, bug, acked + owned + still open,
 priority A, deadline in 3 days, expiry in 5 days, 3 votes. (A leading
